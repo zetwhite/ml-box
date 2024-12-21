@@ -9,10 +9,10 @@ from torchvision.utils import save_image
 
 from torchsummary import summary
 
+import typing
 import matplotlib.pyplot as plt
 
 def get_fashinMNIST_dataloader(batch_size: int): 
-    
     preprocess = transforms.Compose([
         transforms.ToTensor(), # convert images(PILImage) to torch tensors  
         transforms.Normalize((0.5, ), (0.5, ))
@@ -129,7 +129,8 @@ class Generator:
 
     def run(self, x):
         return self.model(x)
-    
+
+    # maximize log(D(G(z)))
     def update_param(self, disc_output)->float:
         self.optim.zero_grad()
         
@@ -145,7 +146,7 @@ class Discriminator:
     def __init__(self, model: DiscrimiatorModel):
         self.model = model
         self.loss = nn.BCELoss()
-        self.optim = optim.Adam(model.parameters(), lr = 0.0002) 
+        self.optim = optim.Adam(model.parameters(), lr = 0.0002, betas=(0.5, 0.999)) 
 
     def eval(self):
         self.model.eval()
@@ -156,41 +157,58 @@ class Discriminator:
     def run(self, x):
         return self.model(x)
     
-    def update_param(self, real_outputs, fake_outputs)->float:
+    # maximize log(D(x)) + log(1-D(G(z)))
+    def update_param(self, real_outputs, fake_outputs)-> typing.Tuple[float, float]:
         self.optim.zero_grad() 
 
-        real_loss = self.loss(torch.ones_like(real_outputs),real_outputs)
-        fake_loss = self.loss(torch.zeros_like(fake_outputs), fake_outputs)
+        ones = torch.ones_like(real_outputs).to(real_outputs.device)
+        real_loss = self.loss(real_outputs, ones)
+
+        zeros = torch.zeros_like(fake_outputs).to(fake_outputs.device)
+        fake_loss = self.loss(fake_outputs, zeros)
+
         loss = real_loss + fake_loss     
         loss.backward() 
 
         self.optim.step()
-        return loss.item()
+        return real_loss.item(), fake_loss.item()
 
 
 def train_step(train_images, gen:Generator, disc:Discriminator, device): 
     batch = train_images.shape[0]
-    # print(batch)
-    # noise = torch.rand((batch, 100), requires_grad=True).to(device)
     noise = torch.normal(mean=0.0, std=1.0, size=(batch, 100)).to(device)
 
-    # gen.train() 
-    # disc.train()
+    gen.train() 
+    disc.train()
 
     fake_images = gen.run(noise)
-    # breakpoint()
+ 
+    # update Generator 
+    fake_images = gen.run(noise)
+    fake_images_copy = fake_images.detach() 
     fake_outputs = disc.run(fake_images)
-    # real_outputs = disc.run(train_images)
-
-    # generator, discirminator  loss 
     gen_loss = gen.update_param(fake_outputs)
-    # disc_loss = disc.update_param(real_outputs, fake_outputs) 
+    
+    # update Discriminator 
+    fake_outputs = disc.run(fake_images_copy)
+    real_outputs = disc.run(train_images)
+    disc_loss = disc.update_param(real_outputs, fake_outputs) 
 
-    return gen_loss, 0. #, disc_loss 
+    return gen_loss, disc_loss, real_outputs.mean(), fake_outputs.mean()
+
+
+def save_sample_img(gen:Generator, device, save_as:str):
+    gen.eval() 
+    noise = torch.normal(mean=0.0, std=1.0, size=(1, 100)).to(device)
+    sample = gen.run(noise)
+    sample = nn.Flatten(start_dim=0, end_dim=1)(sample)
+            
+    to_pil = transforms.ToPILImage()
+    image = to_pil(sample)
+    image.save(save_as)
 
 
 def main():
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'execute on : {device}')
 
@@ -207,45 +225,42 @@ def main():
     gen = Generator(generator_model)
     disc = Discriminator(discriminator_model)
 
-    gen.train() 
-    disc.train()
-
-    epoch = 5
+    epoch = 50
     batch_size = 32 
     data_loader = get_fashinMNIST_dataloader(batch_size)
+    num_step = len(data_loader)
     
     gen_loss_trace = [] 
-    disc_loss_trace = [] 
+    disc_real_score_trace = []
+    disc_fake_score_trace = [] 
     for i in range(epoch):
         gen_loss = 0 
-        disc_loss = 0
+        disc_real_score = 0
+        disc_fake_score = 0
 
         for datas, _ in data_loader:
             datas = datas.to(device)
-            gloss, dloss = train_step(datas, gen, disc, device)
+            gloss, _, real_score, fake_score  = train_step(datas, gen, disc, device)
             gen_loss += gloss
-            disc_loss += dloss
+            disc_real_score += real_score
+            disc_fake_score += fake_score
 
-        print(gen_loss/len(data_loader))
-        gen_loss_trace.append(gen_loss/len(data_loader))    
-        disc_loss_trace.append(disc_loss/len(data_loader))
+        if i % 5 == 0 : 
+            save_sample_img(gen, device, f'sample_img_{i}_0.jpg')
+            save_sample_img(gen, device, f'sample_img_{i}_1.jpg')
+            save_sample_img(gen, device, f'sample_img_{i}_2.jpg')
+            
+            print(f'gen_loss_{i}:{gen_loss/num_step}')
+            print(f'disc_real_score_{i}:{disc_real_score/num_step}')
+            print(f'disc_fake_score_{i}:{disc_fake_score/num_step}')
+            print() 
 
-    # print(gen_loss_trace)
-    # batch = 32 
-    # noise = torch.rand(batch, 100) 
-    # generated_img = generator(noise)
-    # output = discriminator(generated_img)
+        gen_loss_trace.append(gen_loss/num_step)    
+        disc_real_score_trace.append(disc_real_score/num_step)
+        disc_fake_score_trace.append(disc_fake_score/num_step)
 
+    # save weights files
+    torch.save(gen.model.state_dict(), 'generator.pth')
 
 if __name__ == "__main__":
     main()
-
-'''
-for batch_idx, (images, labels) in enumerate(data_loader):
-    print(f"Batch {batch_idx+1}:")
-    print(f" - Images shape: {images.shape}")
-    print(f" - Labels shape: {labels.shape}")
-    break  # Remove this line to go through all batches
-
-breakpoint()
-''' 
