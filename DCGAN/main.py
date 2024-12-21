@@ -133,7 +133,8 @@ class Generator:
     def update_param(self, disc_output)->float:
         self.optim.zero_grad()
         
-        loss = self.loss(torch.ones_like(disc_output), disc_output)
+        ones = torch.ones_like(disc_output).to(disc_output.device)
+        loss = self.loss(disc_output, ones)
         loss.backward()
         
         self.optim.step()
